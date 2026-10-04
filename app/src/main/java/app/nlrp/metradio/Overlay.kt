@@ -127,6 +127,8 @@ class Overlay(private val ctx: Context, private val cb: Callbacks) {
         ptt.background = shape(color, true)
     }
 
+    fun setLabel(text: String) { label.text = text }
+
     fun setChannels(labels: List<String>) {
         menu.removeAllViews()
         fun item(text: String, bg: Int, onClick: () -> Unit) = TextView(ctx).apply {

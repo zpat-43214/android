@@ -9,21 +9,33 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.os.Build
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.SoundPool
+import android.media.ToneGenerator
 import android.os.IBinder
 import android.widget.Toast
 import io.livekit.android.LiveKit
+import io.livekit.android.events.*
 import io.livekit.android.room.Room
 import io.livekit.android.room.track.LocalAudioTrack
 import io.livekit.android.room.track.Track
 import io.socket.client.IO
 import io.socket.client.Socket
 import kotlinx.coroutines.*
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.CopyOnWriteArraySet
 
 /** Owns the LiveKit radio connection, the dispatch-site socket and the floating overlay. */
 class RadioService : Service(), Overlay.Callbacks {
 
-    companion object { const val ACTION_STOP = "app.nlrp.metradio.STOP" }
+    companion object {
+        const val ACTION_STOP = "app.nlrp.metradio.STOP"
+        const val DEBUG_PTT = false   // true = show engine stats on the button while transmitting
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -35,6 +47,15 @@ class RadioService : Service(), Overlay.Callbacks {
     private var micOpen = false
     private var watchdog: Job? = null
     private var booted = false
+    private var diag: Job? = null
+    private var eventsJob: Job? = null
+    private val pool = SoundPool.Builder().setMaxStreams(2).setAudioAttributes(
+        AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()).build()
+    private val loadedSounds = CopyOnWriteArraySet<Int>()
+    private var startSound = 0
+    private var endSound = 0
+    private val tone: ToneGenerator? = try { ToneGenerator(AudioManager.STREAM_MUSIC, 80) } catch (e: Exception) { null }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -81,6 +102,8 @@ class RadioService : Service(), Overlay.Callbacks {
         overlay = Overlay(this@RadioService, this@RadioService).also {
             it.setChannels(channels.map { c -> c.label }); it.show()
         }
+        pool.setOnLoadCompleteListener { _, id, status -> if (status == 0) loadedSounds.add(id) }
+        fetchTones()
         connectSocket(token)
 
         val last = Prefs.lastChannel(this@RadioService)
@@ -114,6 +137,8 @@ class RadioService : Service(), Overlay.Callbacks {
             val r = LiveKit.create(applicationContext)
             r.connect(info.url, info.token)
             room = r; current = ch
+            eventsJob?.cancel()
+            eventsJob = scope.launch { r.events.collect { ev -> if (ev is RoomEvent.DataReceived) onData(ev.data) } }
             r.localParticipant.setMicrophoneEnabled(true)            // publish the mic track…
             if (ch.ptt) setMic(false) else micOpen = true             // PTT: silent until pressed. Pursuit Desk: open mic
             Prefs.saveChannel(this, ch.key)
@@ -127,6 +152,7 @@ class RadioService : Service(), Overlay.Callbacks {
     }
 
     private fun leaveRoom() {
+        eventsJob?.cancel()
         room?.disconnect(); room?.release(); room = null
     }
 
@@ -145,6 +171,8 @@ class RadioService : Service(), Overlay.Callbacks {
         if (ch == null || room == null) { toast("Not connected to a radio channel yet"); return }
         if (ch.ptt) {
             setMic(true); overlay?.setStatus(ch.label, State.TX)
+            playTone(true); sendPtt(true)          // you hear it + everyone else's client plays it
+            if (DEBUG_PTT) startDiag()
             watchdog?.cancel()
             watchdog = scope.launch { delay(90_000); onPttUp() }   // never leave a mic stuck open
         } else {
@@ -155,8 +183,63 @@ class RadioService : Service(), Overlay.Callbacks {
     override fun onPttUp() {
         val ch = current ?: return
         if (!ch.ptt) return
-        watchdog?.cancel()
+        watchdog?.cancel(); diag?.cancel()
         setMic(false); overlay?.setStatus(ch.label, State.READY)
+        sendPtt(false); playTone(false)
+    }
+
+    // ── Transmission tones ───────────────────────────────────────────────
+    // Uses the same mp3s as the web radio. Other clients play them when they get our PTT message.
+    private fun fetchTones() = scope.launch(Dispatchers.IO) {
+        val a = download("transmission-start.mp3"); val b = download("transmission-end.mp3")
+        if (a != null) startSound = pool.load(a.path, 1)
+        if (b != null) endSound = pool.load(b.path, 1)
+    }
+
+    private fun download(name: String): File? = try {
+        val f = File(cacheDir, name)
+        OkHttpClient().newCall(Request.Builder().url("${BuildConfig.BASE_URL}/static/radio/$name").build()).execute().use { r ->
+            if (!r.isSuccessful) null
+            else { f.outputStream().use { o -> r.body!!.byteStream().copyTo(o) }; f }
+        }
+    } catch (e: Exception) { null }
+
+    private fun playTone(start: Boolean) {
+        val id = if (start) startSound else endSound
+        if (id != 0 && id in loadedSounds) pool.play(id, 1f, 1f, 1, 0, 1f)
+        else tone?.startTone(if (start) ToneGenerator.TONE_PROP_BEEP else ToneGenerator.TONE_PROP_ACK, 90)
+    }
+
+    private fun sendPtt(down: Boolean) {
+        val lp = room?.localParticipant ?: return
+        val bytes = """{"t":"ptt","d":${if (down) 1 else 0}}""".toByteArray()
+        scope.launch { try { lp.publishData(bytes) } catch (e: Exception) { } }
+    }
+
+    private fun onData(bytes: ByteArray) {
+        try {
+            val j = JSONObject(String(bytes))
+            if (j.optString("t") != "ptt") return
+            if (j.optInt("d") == 1) playTone(true)
+            else scope.launch { delay(300); playTone(false) }   // let the last words land first
+        } catch (e: Exception) { }
+    }
+
+    // DEBUG: while PTT is held, show what the radio engine thinks is happening.
+    //   pub = mic track published?  mute = published track muted?  en = track enabled?
+    //   lvl = level the SERVER hears from you (should rise when you talk)  peers = others in the room
+    private fun startDiag() {
+        diag?.cancel()
+        diag = scope.launch {
+            while (true) {
+                val r = room; val lp = r?.localParticipant
+                val pub = lp?.getTrackPublication(Track.Source.MICROPHONE)
+                val tr = pub?.track as? LocalAudioTrack
+                overlay?.setLabel("pub=${pub != null} mute=${pub?.muted} en=${tr?.enabled} " +
+                    "lvl=${"%.2f".format(lp?.audioLevel ?: 0f)} peers=${r?.remoteParticipants?.size}")
+                delay(250)
+            }
+        }
     }
 
     override fun onPick(index: Int) { channels.getOrNull(index)?.let { scope.launch { join(it) } } }
@@ -167,6 +250,7 @@ class RadioService : Service(), Overlay.Callbacks {
         socket?.disconnect(); socket = null
         leaveRoom()
         overlay?.hide()
+        diag?.cancel(); tone?.release(); pool.release()
         scope.cancel()
         super.onDestroy()
     }
