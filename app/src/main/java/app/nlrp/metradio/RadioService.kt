@@ -67,6 +67,9 @@ class RadioService : Service(), Overlay.Callbacks {
     private fun boot() = scope.launch {
         val token = Prefs.token(this@RadioService)
         if (token == null) { stopSelf(); return@launch }
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            toast("Microphone permission missing — open MET Radio and allow it"); stopSelf(); return@launch
+        }
         try {
             channels = Api.channels(token)
         } catch (e: Api.Unauthorized) {
@@ -78,7 +81,12 @@ class RadioService : Service(), Overlay.Callbacks {
         overlay = Overlay(this@RadioService, this@RadioService).also {
             it.setChannels(channels.map { c -> c.label }); it.show()
         }
-        launch { for (on in micCmds) room?.localParticipant?.setMicrophoneEnabled(on) }
+        launch {
+            for (on in micCmds) {
+                try { room?.localParticipant?.setMicrophoneEnabled(on) }
+                catch (e: Exception) { toast("Mic error: ${e.message}") }
+            }
+        }
         connectSocket(token)
 
         val last = Prefs.lastChannel(this@RadioService)
@@ -133,8 +141,8 @@ class RadioService : Service(), Overlay.Callbacks {
 
     // ── Overlay callbacks ────────────────────────────────────────────────
     override fun onPttDown() {
-        val ch = current ?: return
-        if (room == null) return
+        val ch = current
+        if (ch == null || room == null) { toast("Not connected to a radio channel yet"); return }
         if (ch.ptt) {
             setMic(true); overlay?.setStatus(ch.label, State.TX)
             watchdog?.cancel()
