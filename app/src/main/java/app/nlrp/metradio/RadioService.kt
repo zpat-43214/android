@@ -13,10 +13,11 @@ import android.os.IBinder
 import android.widget.Toast
 import io.livekit.android.LiveKit
 import io.livekit.android.room.Room
+import io.livekit.android.room.track.LocalAudioTrack
+import io.livekit.android.room.track.Track
 import io.socket.client.IO
 import io.socket.client.Socket
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 import org.json.JSONObject
 
 /** Owns the LiveKit radio connection, the dispatch-site socket and the floating overlay. */
@@ -25,7 +26,6 @@ class RadioService : Service(), Overlay.Callbacks {
     companion object { const val ACTION_STOP = "app.nlrp.metradio.STOP" }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val micCmds = Channel<Boolean>(Channel.CONFLATED)   // ordered mic on/off commands
 
     private var room: Room? = null
     private var socket: Socket? = null
@@ -81,12 +81,6 @@ class RadioService : Service(), Overlay.Callbacks {
         overlay = Overlay(this@RadioService, this@RadioService).also {
             it.setChannels(channels.map { c -> c.label }); it.show()
         }
-        launch {
-            for (on in micCmds) {
-                try { room?.localParticipant?.setMicrophoneEnabled(on) }
-                catch (e: Exception) { toast("Mic error: ${e.message}") }
-            }
-        }
         connectSocket(token)
 
         val last = Prefs.lastChannel(this@RadioService)
@@ -121,8 +115,7 @@ class RadioService : Service(), Overlay.Callbacks {
             r.connect(info.url, info.token)
             room = r; current = ch
             r.localParticipant.setMicrophoneEnabled(true)            // publish the mic track…
-            if (ch.ptt) { micOpen = false; r.localParticipant.setMicrophoneEnabled(false) }   // …then mute until PTT
-            else micOpen = true                                       // open-mic channel (Pursuit Desk)
+            if (ch.ptt) setMic(false) else micOpen = true             // PTT: silent until pressed. Pursuit Desk: open mic
             Prefs.saveChannel(this, ch.key)
             socket?.emit("device_radio_channel", JSONObject().put("channel", ch.key))
             overlay?.setStatus(ch.label, if (ch.ptt) State.READY else State.OPEN)
@@ -137,7 +130,14 @@ class RadioService : Service(), Overlay.Callbacks {
         room?.disconnect(); room?.release(); room = null
     }
 
-    private fun setMic(on: Boolean) { micOpen = on; micCmds.trySend(on) }
+    // Flips the published mic track on/off directly (instant, no server mute round-trip).
+    private fun setMic(on: Boolean) {
+        micOpen = on
+        val lp = room?.localParticipant ?: return
+        val track = lp.getTrackPublication(Track.Source.MICROPHONE)?.track as? LocalAudioTrack
+        if (track != null) track.enabled = on
+        else scope.launch { try { lp.setMicrophoneEnabled(on) } catch (e: Exception) { toast("Mic error: ${e.message}") } }
+    }
 
     // ── Overlay callbacks ────────────────────────────────────────────────
     override fun onPttDown() {
