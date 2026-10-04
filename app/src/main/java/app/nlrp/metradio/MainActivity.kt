@@ -98,7 +98,7 @@ class MainActivity : Activity() {
             Prefs.token(this) == null -> toast("Pair first (step 3)")
             else -> {
                 ContextCompat.startForegroundService(this, Intent(this, RadioService::class.java))
-                toast("Overlay running — open Roblox"); moveTaskToBack(true)
+                toast("Overlay running — now press Home and open Roblox")
             }
         }
     }
