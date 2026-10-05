@@ -11,6 +11,8 @@
 
     <application
         android:label="MET Radio"
+        android:icon="@drawable/logo_square"
+        android:roundIcon="@drawable/logo_square"
         android:allowBackup="false"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
