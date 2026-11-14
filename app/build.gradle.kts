@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "app.yrp.sypapps"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "app.yrp.sypapps"
