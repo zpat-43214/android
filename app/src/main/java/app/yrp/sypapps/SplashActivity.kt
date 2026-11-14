@@ -10,13 +10,10 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import kotlinx.coroutines.*
 
 /** Launcher screen (loading.png): logo, spinner, then straight to Login or Home depending on
- * whether the web session cookie from a previous login is still good. */
+ * whether we're still holding a valid Auth0 session from a previous login. */
 class SplashActivity : Activity() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,13 +40,8 @@ class SplashActivity : Activity() {
             addView(col, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { gravity = Gravity.TOP })
         })
 
-        scope.launch {
-            val loggedIn = try { Backend.officerState(); true } catch (e: Exception) { false }
-            val next = if (loggedIn) HomeActivity::class.java else LoginActivity::class.java
-            startActivity(Intent(this@SplashActivity, next))
-            finish()
-        }
+        val next = if (Auth0Session.hasValidCredentials()) HomeActivity::class.java else LoginActivity::class.java
+        startActivity(Intent(this@SplashActivity, next))
+        finish()
     }
-
-    override fun onDestroy() { scope.cancel(); super.onDestroy() }
 }

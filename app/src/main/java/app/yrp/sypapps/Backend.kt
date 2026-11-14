@@ -9,10 +9,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 
-/** Calls the dispatch site's existing session-authenticated JSON APIs (/api/officer/...) using
- * the web-login session cookie — see WebSession. Separate from Api.kt, which is the
- * device-token-authenticated radio pairing API and deliberately knows nothing about the web
- * session. */
+/** Calls the dispatch site's /api/officer/... JSON APIs, authenticated with the native Auth0
+ * login's access token (see Auth0Session) rather than a cookie. Separate from Api.kt, which is
+ * the device-token-authenticated radio pairing API and deliberately knows nothing about this. */
 object Backend {
     private val JSON = "application/json".toMediaType()
     private val base = BuildConfig.BASE_URL
@@ -45,16 +44,25 @@ object Backend {
     data class TrackedBolo(val name: String, val x: Double, val z: Double, val reason: String, val addedBy: String)
     data class AnprData(val cameras: List<Camera>, val tracked: List<TrackedBolo>)
 
-    private fun getJson(url: String): JSONObject {
-        WebSession.client.newCall(Request.Builder().url(url).build()).execute().use { r ->
+    // Auth0Session.accessToken() refreshes via the stored refresh token when the current one's
+    // expired, so this always hands back something usable — or throws, which we treat the same
+    // as a 401 from the server itself (no valid session, caller sends them back to Login).
+    private suspend fun authedRequest(): Request.Builder {
+        val token = try { Auth0Session.accessToken() } catch (e: Exception) { throw Unauthorized() }
+        return Request.Builder().header("Authorization", "Bearer $token")
+    }
+
+    private suspend fun getJson(url: String): JSONObject {
+        val req = authedRequest().url(url).build()
+        WebSession.client.newCall(req).execute().use { r ->
             if (r.code == 401 || r.code == 403) throw Unauthorized()
             val text = r.body?.string().orEmpty()
             return try { JSONObject(text) } catch (e: Exception) { JSONObject() }
         }
     }
 
-    private fun postJson(url: String, body: JSONObject) {
-        val req = Request.Builder().url(url).post(body.toString().toRequestBody(JSON)).build()
+    private suspend fun postJson(url: String, body: JSONObject) {
+        val req = authedRequest().url(url).post(body.toString().toRequestBody(JSON)).build()
         WebSession.client.newCall(req).execute().use { r ->
             if (r.code == 401 || r.code == 403) throw Unauthorized()
             if (!r.isSuccessful) throw IOException("HTTP ${r.code}")

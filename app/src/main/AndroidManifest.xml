@@ -10,6 +10,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
+        android:name=".SypApp"
         android:label="SYP Apps"
         android:icon="@drawable/logo_square"
         android:roundIcon="@drawable/logo_square"
